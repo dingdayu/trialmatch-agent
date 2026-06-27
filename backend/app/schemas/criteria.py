@@ -51,3 +51,13 @@ class CriteriaResponse(BaseModel):
 class CriteriaBatchImport(BaseModel):
     """批量导入入排标准请求"""
     criteria: List[CriteriaCreate]
+
+
+class CriteriaBatchUpdate(BaseModel):
+    """批量操作入排标准请求 (reorder / toggle_active)"""
+    action: str = Field(..., pattern="^(reorder|toggle_active)$")
+    ids: List[str] = Field(..., min_length=1)
+    # reorder 时的排序顺序
+    sort_orders: Optional[List[int]] = None
+    # toggle_active 时的目标状态
+    is_active: Optional[bool] = None

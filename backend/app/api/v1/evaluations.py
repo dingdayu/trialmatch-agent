@@ -11,8 +11,10 @@ from app.schemas.evaluation import (
     EvaluationDetailResponse,
     ManualReviewRequest,
     BatchReviewRequest,
+    CitationResponse,
 )
 from app.services.evaluation_service import EvaluationService
+from app.repositories.evaluation_repo import EvaluationRepository
 from app.utils.response import APIResponse
 from app.models.user import User
 
@@ -104,3 +106,48 @@ async def batch_review(
         reviewer_id=current_user.id,
     )
     return APIResponse.success(data={"reviewed_count": count})
+
+
+# ========== 引用来源 (Task 14) ==========
+
+@router.get("/evaluations/{evaluation_id}/citations")
+async def get_citations(
+    evaluation_id: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """#43 获取评价的引用来源列表"""
+    repo = EvaluationRepository(db)
+    citations = await repo.get_citations(evaluation_id)
+
+    total = len(citations)
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_items = citations[start:end]
+
+    return APIResponse.success(
+        data={
+            "items": [CitationResponse.model_validate(c).model_dump() for c in page_items],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
+    )
+
+
+@router.get("/citations/{citation_id}/context")
+async def get_citation_context(
+    citation_id: str,
+    before: int = Query(1, ge=0, le=5),
+    after: int = Query(1, ge=0, le=5),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """#44 查看引用原文上下文"""
+    repo = EvaluationRepository(db)
+    context = await repo.get_citation_context(citation_id, before=before, after=after)
+    if not context:
+        raise HTTPException(status_code=404, detail="引用不存在")
+    return APIResponse.success(data=context)

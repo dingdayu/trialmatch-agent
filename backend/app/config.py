@@ -21,9 +21,19 @@ class Settings(BaseSettings):
     upload_dir: str = "./resource/uploads"
     max_upload_size_mb: int = 50
 
+    # LLM 配置
+    llm_base_url: str = "https://api.openai.com/v1"
+    llm_api_key: str = ""
+    llm_model_name: str = "gpt-4o-mini"
+    llm_temperature: float = 0.1
+    llm_max_tokens: int = 4096
+    llm_timeout: int = 120
+    llm_max_retries: int = 3
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        extra = "ignore"
 
 
 @lru_cache()

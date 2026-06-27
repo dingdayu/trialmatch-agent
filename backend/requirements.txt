@@ -9,3 +9,15 @@ passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 python-multipart==0.0.9
 aiofiles==24.1.0
+alembic==1.16.5
+httpx==0.28.1
+
+# 文档解析（可选）
+# PyMuPDF==1.24.0  # PDF 解析
+# paddlepaddle  # OCR 引擎
+# paddleocr  # OCR 工具
+# python-docx==1.1.0  # DOCX 解析
+
+# 测试
+pytest==8.4.2
+pytest-asyncio==1.2.0

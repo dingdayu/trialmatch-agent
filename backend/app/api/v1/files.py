@@ -3,13 +3,15 @@ from __future__ import annotations
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
+from fastapi.responses import FileResponse as FastAPIFileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import get_current_user
-from app.schemas.file import FileResponse, FileListResponse
+from app.schemas.file import FileResponse, FileListResponse, ParseTriggerRequest, ParseTriggerResponse, ChunkResponse
 from app.services.file_service import FileService
 from app.utils.response import APIResponse
+from app.exceptions import NotFoundException
 from app.models.user import User
 
 router = APIRouter()
@@ -127,4 +129,78 @@ async def delete_file(
         await service.delete_file(file_id)
         return APIResponse.success(data=True)
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise NotFoundException(str(e))
+
+
+@router.get("/{file_id}/download")
+async def download_file(
+    file_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """下载文件"""
+    service = FileService(db)
+    try:
+        file_record = await service.download_file(file_id)
+        return FastAPIFileResponse(
+            path=file_record.file_path,
+            filename=file_record.file_name,
+            media_type=file_record.mime_type or "application/octet-stream",
+        )
+    except ValueError as e:
+        raise NotFoundException(str(e))
+
+
+@router.post("/{file_id}/parse")
+async def trigger_parse(
+    file_id: str,
+    body: ParseTriggerRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """触发文件解析（当前为同步占位，后续对接 Celery）"""
+    service = FileService(db)
+    try:
+        file_record = await service.get_file(file_id)
+        # TODO: 提交 Celery 解析任务
+        return APIResponse.success(
+            data=ParseTriggerResponse(
+                file_id=file_id,
+                status="queued",
+                message="解析任务已提交" if not body.force else "强制重解析任务已提交",
+            ).model_dump()
+        )
+    except ValueError as e:
+        raise NotFoundException(str(e))
+
+
+@router.get("/{file_id}/chunks")
+async def get_file_chunks(
+    file_id: str,
+    page_no: Optional[int] = None,
+    keyword: Optional[str] = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """获取文件解析片段"""
+    service = FileService(db)
+    try:
+        items, total = await service.get_chunks(
+            file_id=file_id,
+            page_no=page_no,
+            keyword=keyword,
+            page=page,
+            page_size=page_size,
+        )
+        return APIResponse.success(
+            data={
+                "items": [ChunkResponse.model_validate(c) for c in items],
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+            }
+        )
+    except ValueError as e:
+        raise NotFoundException(str(e))

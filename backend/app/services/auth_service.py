@@ -94,3 +94,19 @@ class AuthService:
         await self.db.commit()
         await self.db.refresh(user)
         return user
+
+    async def change_password(self, user_id: str, old_password: str, new_password: str) -> None:
+        """修改密码"""
+        result = await self.db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        if not user:
+            raise ValueError("用户不存在")
+
+        if not verify_password(old_password, user.password_hash):
+            raise ValueError("原密码错误")
+
+        if old_password == new_password:
+            raise ValueError("新密码不能与原密码相同")
+
+        user.password_hash = hash_password(new_password)
+        await self.db.commit()

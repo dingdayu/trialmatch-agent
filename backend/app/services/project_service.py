@@ -88,5 +88,13 @@ class ProjectService:
     async def delete_project(self, project_id: str) -> None:
         """删除项目"""
         project = await self.get_project(project_id)
+        # 检查是否存在受试者数据
+        from app.models.subject import Subject
+        result = await self.db.execute(
+            select(func.count()).select_from(Subject).where(Subject.project_id == project_id)
+        )
+        subject_count = result.scalar() or 0
+        if subject_count > 0:
+            raise ValueError(f"项目下存在 {subject_count} 名受试者，无法删除")
         await self.db.delete(project)
         await self.db.commit()

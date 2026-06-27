@@ -198,3 +198,43 @@ class FileService:
             os.remove(file_record.file_path)
         await self.db.delete(file_record)
         await self.db.commit()
+
+    async def download_file(self, file_id: str) -> UploadedFileModel:
+        """获取文件下载信息"""
+        file_record = await self.get_file(file_id)
+        if not os.path.exists(file_record.file_path):
+            raise ValueError("文件已被删除")
+        return file_record
+
+    async def get_chunks(
+        self,
+        file_id: str,
+        page_no: Optional[int] = None,
+        keyword: Optional[str] = None,
+        page: int = 1,
+        page_size: int = 50,
+    ):
+        """获取文件解析片段"""
+        from app.models.document_chunk import DocumentChunk
+
+        await self.get_file(file_id)  # 确保文件存在
+
+        query = select(DocumentChunk).where(DocumentChunk.file_id == file_id)
+        count_query = select(func.count()).select_from(DocumentChunk).where(DocumentChunk.file_id == file_id)
+
+        if page_no is not None:
+            query = query.where(DocumentChunk.page_no == page_no)
+            count_query = count_query.where(DocumentChunk.page_no == page_no)
+        if keyword:
+            query = query.where(DocumentChunk.content.ilike(f"%{keyword}%"))
+            count_query = count_query.where(DocumentChunk.content.ilike(f"%{keyword}%"))
+
+        total_result = await self.db.execute(count_query)
+        total = total_result.scalar() or 0
+
+        offset = (page - 1) * page_size
+        query = query.order_by(DocumentChunk.page_no, DocumentChunk.chunk_index).offset(offset).limit(page_size)
+        result = await self.db.execute(query)
+        items = list(result.scalars().all())
+
+        return items, total

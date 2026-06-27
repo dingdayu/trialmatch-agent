@@ -2,14 +2,15 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import get_current_user, require_role
-from app.schemas.criteria import CriteriaCreate, CriteriaUpdate, CriteriaResponse, CriteriaBatchImport
+from app.schemas.criteria import CriteriaCreate, CriteriaUpdate, CriteriaResponse, CriteriaBatchImport, CriteriaBatchUpdate
 from app.services.criteria_service import CriteriaService
 from app.utils.response import APIResponse
+from app.exceptions import NotFoundException, ConflictException
 from app.models.user import User
 
 router = APIRouter()
@@ -94,7 +95,29 @@ async def delete_criterion(
         await service.delete_criterion(criterion_id)
         return APIResponse.success(data=True)
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise NotFoundException(str(e))
+
+
+@router.post("/projects/{project_id}/criteria/batch")
+async def batch_update_criteria(
+    project_id: str,
+    body: CriteriaBatchUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role("admin", "project_manager")),
+):
+    """批量操作入排标准 (reorder / toggle_active)"""
+    service = CriteriaService(db)
+    try:
+        count = await service.batch_update(
+            project_id=project_id,
+            action=body.action,
+            ids=body.ids,
+            sort_orders=body.sort_orders,
+            is_active=body.is_active,
+        )
+        return APIResponse.success(data={"updated_count": count})
+    except ValueError as e:
+        raise NotFoundException(str(e))
 
 
 @router.post("/projects/{project_id}/criteria/batch-import")

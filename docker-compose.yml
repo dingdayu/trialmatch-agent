@@ -1,0 +1,23 @@
+# TrialMatch AI Docker Compose 开发环境 — 对应 Task 5.1
+
+version: "3.8"
+
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=sqlite+aiosqlite:///./resource/trialmatch.db
+      - UPLOAD_DIR=./resource/uploads
+      - DEBUG=true
+      - JWT_SECRET=${JWT_SECRET:-changeme}
+    volumes:
+      - ./resource:/app/resource
+      - ./app:/app/app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
