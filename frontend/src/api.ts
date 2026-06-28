@@ -192,7 +192,7 @@ export async function uploadProjectFile(projectId: string, file: File, fileType:
   form.set("file", file)
   form.set("file_type", fileType)
   form.set("file_scope", "project_protocol")
-  return request<UploadedFile>(`/api/v1/projects/${projectId}/files`, {
+  return request<UploadedFile>(`/api/v1/files/projects/${projectId}/files`, {
     method: "POST",
     body: form,
   })
@@ -203,7 +203,7 @@ export async function uploadSubjectFile(subjectId: string, file: File, fileType:
   form.set("file", file)
   form.set("file_type", fileType)
   form.set("file_scope", "subject_data")
-  return request<UploadedFile>(`/api/v1/subjects/${subjectId}/files`, {
+  return request<UploadedFile>(`/api/v1/files/subjects/${subjectId}/files`, {
     method: "POST",
     body: form,
   })
