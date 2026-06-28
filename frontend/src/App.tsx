@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
 import {
   clearSession,
   createCriterion,
@@ -235,7 +235,7 @@ export function App() {
         <button className="sidebar-brand naked-button" type="button" onClick={() => navigate("/projects")}>
           <span className="brand-mark">TM</span>
           <span>
-            <strong>TrialMatch AI</strong>
+            <strong>TrialMatch Agent</strong>
             <small>研筛通</small>
           </span>
         </button>
@@ -422,6 +422,7 @@ function ProjectsPage({
   readonly projects: Project[]
   readonly onCreate: (form: { project_no: string; study_name: string; indication?: string; phase?: string; sponsor?: string }) => Promise<void>
 }) {
+  const [isCreateOpen, setIsCreateOpen] = useState(false)
   const activeProjects = projects.filter((item) => item.status === "screening" || item.status === "active").length
 
   return (
@@ -430,6 +431,7 @@ function ProjectsPage({
         kicker="Projects"
         title="项目工作台"
         description="集中查看筛选中、配置中和暂停的临床研究项目，并进入项目配置、受试者管理和证据链复核。"
+        actions={<button className="btn btn-primary" type="button" onClick={() => setIsCreateOpen(true)}>新增项目</button>}
       />
       <section className="grid-4">
         <MetricCard label="项目总数" value={projects.length} />
@@ -437,10 +439,6 @@ function ProjectsPage({
         <MetricCard label="接口来源" tone="info" value="FastAPI" />
         <MetricCard label="认证方式" tone="warning" value="JWT" />
       </section>
-      <DataCard>
-        <CardTitle title="新建项目" meta="最小字段与后端 ProjectCreate 对齐" />
-        <ProjectForm onSubmit={onCreate} />
-      </DataCard>
       <DataCard>
         <CardTitle title="研究项目" meta={`${projects.length} 个项目`} />
         {projects.length === 0 ? (
@@ -481,7 +479,52 @@ function ProjectsPage({
           </div>
         )}
       </DataCard>
+      <Modal isOpen={isCreateOpen} title="新建项目" onClose={() => setIsCreateOpen(false)}>
+        <ProjectForm
+          onSubmit={async (form) => {
+            await onCreate(form)
+            setIsCreateOpen(false)
+          }}
+        />
+      </Modal>
     </>
+  )
+}
+
+function Modal({
+  isOpen,
+  title,
+  children,
+  onClose,
+}: {
+  readonly isOpen: boolean
+  readonly title: string
+  readonly children: ReactNode
+  readonly onClose: () => void
+}) {
+  if (!isOpen) {
+    return null
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        aria-modal="true"
+        className="modal-card"
+        role="dialog"
+        aria-labelledby="modal-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="modal-header">
+          <div>
+            <span className="eyebrow">Form</span>
+            <h2 id="modal-title">{title}</h2>
+          </div>
+          <button className="btn btn-ghost" type="button" onClick={onClose}>关闭</button>
+        </div>
+        {children}
+      </section>
+    </div>
   )
 }
 
@@ -534,6 +577,9 @@ function ProjectWorkspace({
   readonly onUpdatePrompt: (aiPrompt: string) => Promise<void>
   readonly onUploadProjectFile: (file: File, fileType: string) => Promise<void>
 }) {
+  const [isSubjectOpen, setIsSubjectOpen] = useState(false)
+  const [isCriterionOpen, setIsCriterionOpen] = useState(false)
+  const [isFileUploadOpen, setIsFileUploadOpen] = useState(false)
   const inclusionCount = criteria.filter((item) => item.criterion_type === "inclusion").length
   const exclusionCount = criteria.filter((item) => item.criterion_type === "exclusion").length
 
@@ -551,33 +597,59 @@ function ProjectWorkspace({
         <MetricCard label="排除标准" tone="danger" value={exclusionCount} />
         <MetricCard label="项目文件" tone="info" value={files.length} />
       </section>
-      <section className="grid-2">
-        <DataCard>
-          <CardTitle title="新增受试者" meta="对接 /projects/{project_id}/subjects" />
-          <SubjectForm onSubmit={onCreateSubject} />
-        </DataCard>
-        <DataCard>
-          <CardTitle title="新增入排标准" meta="criterion-level matching" />
-          <CriterionForm sortOrder={criteria.length + 1} onSubmit={onCreateCriterion} />
-        </DataCard>
-      </section>
+      <DataCard>
+        <CardTitle
+          title="候选受试者"
+          meta="资料上传、初筛状态和总体建议"
+          actions={<button className="btn btn-primary" type="button" onClick={() => setIsSubjectOpen(true)}>新增受试者</button>}
+        />
+        {subjects.length === 0 ? <EmptyState>暂无受试者。</EmptyState> : <SubjectsTable subjects={subjects} />}
+      </DataCard>
+      <DataCard>
+        <CardTitle
+          title="项目方案文件"
+          meta="protocol / informed consent"
+          actions={<button className="btn btn-primary" type="button" onClick={() => setIsFileUploadOpen(true)}>上传项目文件</button>}
+        />
+        <FilesTable files={files} />
+      </DataCard>
+      <DataCard>
+        <CardTitle
+          title="入排标准"
+          meta="AI 判断配置"
+          actions={<button className="btn btn-primary" type="button" onClick={() => setIsCriterionOpen(true)}>新增入排标准</button>}
+        />
+        {criteria.length === 0 ? <EmptyState>暂无入排标准。</EmptyState> : <CriteriaTable criteria={criteria} />}
+      </DataCard>
       <DataCard>
         <CardTitle title="项目级 AI 提示词" meta="控制整体判断原则和证据引用要求" />
         <ProjectPromptForm aiPrompt={project?.ai_prompt ?? ""} onSubmit={onUpdatePrompt} />
       </DataCard>
-      <DataCard>
-        <CardTitle title="项目方案文件" meta="protocol / informed consent" />
-        <FileUpload onSubmit={onUploadProjectFile} />
-        <FilesTable files={files} />
-      </DataCard>
-      <DataCard>
-        <CardTitle title="候选受试者" meta="资料上传、初筛状态和总体建议" />
-        {subjects.length === 0 ? <EmptyState>暂无受试者。</EmptyState> : <SubjectsTable subjects={subjects} />}
-      </DataCard>
-      <DataCard>
-        <CardTitle title="入排标准" meta="AI 判断配置" />
-        {criteria.length === 0 ? <EmptyState>暂无入排标准。</EmptyState> : <CriteriaTable criteria={criteria} />}
-      </DataCard>
+      <Modal isOpen={isSubjectOpen} title="新增受试者" onClose={() => setIsSubjectOpen(false)}>
+        <SubjectForm
+          onSubmit={async (form) => {
+            await onCreateSubject(form)
+            setIsSubjectOpen(false)
+          }}
+        />
+      </Modal>
+      <Modal isOpen={isCriterionOpen} title="新增入排标准" onClose={() => setIsCriterionOpen(false)}>
+        <CriterionForm
+          sortOrder={criteria.length + 1}
+          onSubmit={async (form) => {
+            await onCreateCriterion(form)
+            setIsCriterionOpen(false)
+          }}
+        />
+      </Modal>
+      <Modal isOpen={isFileUploadOpen} title="上传项目文件" onClose={() => setIsFileUploadOpen(false)}>
+        <FileUpload
+          onSubmit={async (file, fileType) => {
+            await onUploadProjectFile(file, fileType)
+            setIsFileUploadOpen(false)
+          }}
+        />
+      </Modal>
     </>
   )
 }
