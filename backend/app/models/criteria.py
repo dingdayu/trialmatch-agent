@@ -27,6 +27,8 @@ class EligibilityCriterion(Base):
     required_fields: Mapped[Optional[List]] = mapped_column(JSON, default=list)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="manual")
+    review_status: Mapped[str] = mapped_column(String(16), nullable=False, default="confirmed")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

@@ -19,6 +19,8 @@ from app.schemas.screening import (
     BatchRunResponse,
 )
 from app.services.screening_service import ScreeningService
+from app.services.audit_service import record_audit
+from app.schemas.enums import ActionType, TargetType
 from app.utils.response import APIResponse
 from app.models.user import User
 from app.utils.logger import logger
@@ -45,6 +47,16 @@ async def start_screening(
             force_reparse=body.force_reparse_files,
         )
         logger.info(f"启动初筛: {run.run_no}", extra={"user_id": current_user.id})
+        await record_audit(
+            db,
+            user_id=current_user.id,
+            action_type=ActionType.SCREENING_START,
+            target_type=TargetType.SCREENING_RUN,
+            target_id=run.id,
+            project_id=run.project_id,
+            subject_id=run.subject_id,
+            after_value={"run_no": run.run_no},
+        )
         return APIResponse.success(
             data=ScreeningRunResponse.model_validate(run).model_dump(),
             message="初筛任务已创建",
@@ -88,6 +100,19 @@ async def batch_start_screening(
             prompt_version=body.prompt_version,
             criteria_ids=body.criteria_ids,
             force_reparse=body.force_reparse_files,
+        )
+        await record_audit(
+            db,
+            user_id=current_user.id,
+            action_type=ActionType.SCREENING_START,
+            target_type=TargetType.SCREENING_RUN,
+            target_id=result["batch_id"],
+            project_id=project_id,
+            after_value={
+                "batch_id": result["batch_id"],
+                "run_count": len(result["runs"]),
+                "skipped_count": result["skipped_count"],
+            },
         )
         return APIResponse.success(
             data=BatchRunResponse(
@@ -157,6 +182,16 @@ async def rerun_screening(
             prompt_version=body.prompt_version,
             criteria_ids=body.criteria_ids,
         )
+        await record_audit(
+            db,
+            user_id=current_user.id,
+            action_type=ActionType.SCREENING_START,
+            target_type=TargetType.SCREENING_RUN,
+            target_id=run.id,
+            project_id=run.project_id,
+            subject_id=run.subject_id,
+            after_value={"run_no": run.run_no, "rerun_of": run_id},
+        )
         return APIResponse.success(
             data=ScreeningRunResponse.model_validate(run).model_dump(),
             message="重跑任务已创建",
@@ -175,6 +210,15 @@ async def confirm_all(
     service = ScreeningService(db)
     try:
         count = await service.confirm_all(subject_id)
+        await record_audit(
+            db,
+            user_id=current_user.id,
+            action_type=ActionType.CONFIRM_ALL,
+            target_type=TargetType.SUBJECT,
+            target_id=subject_id,
+            subject_id=subject_id,
+            after_value={"confirmed_count": count},
+        )
         return APIResponse.success(
             data={"confirmed_count": count, "subject_id": subject_id, "new_status": "completed"},
             message=f"已确认 {count} 条匹配结果",

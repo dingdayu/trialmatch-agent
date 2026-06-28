@@ -3,6 +3,7 @@ import type {
   AuditLog,
   Criterion,
   EvaluationDetail,
+  GenerateCriteriaResult,
   LatestEvaluations,
   LoginResponse,
   PageData,
@@ -66,18 +67,36 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     headers,
   })
 
-  let envelope: ApiEnvelope<T>
+  let payload: ApiEnvelope<T> & { detail?: unknown }
   try {
-    envelope = (await response.json()) as ApiEnvelope<T>
+    payload = (await response.json()) as ApiEnvelope<T> & { detail?: unknown }
   } catch {
     throw new Error(`接口响应不是 JSON：${response.status}`)
   }
 
-  if (!response.ok || envelope.code !== 0) {
-    throw new Error(envelope.message || `接口请求失败：${response.status}`)
+  if (!response.ok || payload.code !== 0) {
+    const detail = extractDetailMessage(payload.detail)
+    throw new Error(detail ?? payload.message ?? `接口请求失败：${response.status}`)
   }
 
-  return envelope.data
+  return payload.data
+}
+
+function extractDetailMessage(detail: unknown): string | null {
+  if (typeof detail === "string") {
+    return detail
+  }
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) =>
+        item !== null && typeof item === "object" && "msg" in item
+          ? String((item as { msg: unknown }).msg)
+          : null,
+      )
+      .filter((msg): msg is string => msg !== null)
+    return messages.length > 0 ? messages.join("；") : null
+  }
+  return null
 }
 
 export async function login(username: string, password: string): Promise<LoginResponse> {
@@ -163,6 +182,33 @@ export async function fetchCriteria(projectId: string): Promise<Criterion[]> {
   return request<Criterion[]>(`/api/v1/projects/${projectId}/criteria`)
 }
 
+export async function generateCriteriaFromProtocol(
+  projectId: string,
+  fileId?: string,
+): Promise<GenerateCriteriaResult> {
+  const params = fileId !== undefined ? `?file_id=${fileId}` : ""
+  return request<GenerateCriteriaResult>(
+    `/api/v1/projects/${projectId}/criteria/generate-from-protocol${params}`,
+    { method: "POST" },
+  )
+}
+
+export async function updateCriterion(
+  criterionId: string,
+  input: Partial<{
+    criterion_text: string
+    criterion_explanation: string
+    ai_instruction: string
+    is_active: boolean
+    review_status: string
+  }>,
+): Promise<boolean> {
+  return request<boolean>(`/api/v1/criteria/${criterionId}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  })
+}
+
 export async function createCriterion(
   projectId: string,
   input: {
@@ -179,12 +225,23 @@ export async function createCriterion(
   })
 }
 
-export async function fetchFiles(projectId: string, subjectId?: string): Promise<PageData<UploadedFile>> {
+export async function fetchFiles(
+  projectId: string,
+  subjectId?: string,
+  fileScope?: "project_protocol" | "subject_data",
+): Promise<PageData<UploadedFile>> {
   const params = new URLSearchParams({ project_id: projectId, page_size: "100" })
   if (subjectId !== undefined) {
     params.set("subject_id", subjectId)
   }
+  if (fileScope !== undefined) {
+    params.set("file_scope", fileScope)
+  }
   return request<PageData<UploadedFile>>(`/api/v1/files?${params.toString()}`)
+}
+
+export async function fetchFile(fileId: string): Promise<UploadedFile> {
+  return request<UploadedFile>(`/api/v1/files/${fileId}`)
 }
 
 export async function uploadProjectFile(projectId: string, file: File, fileType: string): Promise<UploadedFile> {
@@ -239,6 +296,16 @@ export async function startScreening(subjectId: string): Promise<{ id: string; r
     method: "POST",
     body: JSON.stringify({ prompt_version: "frontend-manual-run" }),
   })
+}
+
+export async function executeScreening(
+  subjectId: string,
+  runId: string,
+): Promise<{ overall_result?: string; evaluation_count?: number }> {
+  return request<{ overall_result?: string; evaluation_count?: number }>(
+    `/api/v1/subjects/${subjectId}/screening-runs/${runId}/execute`,
+    { method: "POST" },
+  )
 }
 
 export async function exportReport(subjectId: string): Promise<{ export_task_id: string; download_url?: string; status: string }> {

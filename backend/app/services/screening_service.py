@@ -106,10 +106,10 @@ class ScreeningService:
             raise
 
     async def _run_screening_pipeline(self, run: ScreeningRun) -> dict:
-        """执行初筛流水线：加载条件 → 调用 LLM → 写入结果"""
+        """执行初筛流水线：加载条件 → 逐条 Agent 匹配 → 写入结果"""
         from app.services.ai_engine import AIEngine
+        from app.agents import CriterionMatchAgent
 
-        # 加载标准和分片
         criteria_list = await self._load_criteria(run.project_id)
         chunks = await self._load_chunks(run.subject_id)
         subject = await self._get_subject(run.subject_id)
@@ -117,7 +117,7 @@ class ScreeningService:
 
         chunks_text = "\n\n".join([c.content for c in chunks])
 
-        engine = AIEngine()
+        match_agent = CriterionMatchAgent()
         evaluations = []
 
         for criterion in criteria_list:
@@ -140,27 +140,13 @@ class ScreeningService:
 
             ai_prompt = project.ai_prompt if project else None
 
-            try:
-                result = await engine.evaluate_criterion(
-                    criterion=criterion_dict,
-                    subject_info=subject_dict,
-                    chunks_text=chunks_text,
-                    ai_prompt=ai_prompt,
-                )
-            except Exception as e:
-                logger.warning(f"标准 {criterion.criterion_code} 评估失败: {str(e)}")
-                result = {
-                    "criterion_id": criterion.id,
-                    "criterion_code": criterion.criterion_code,
-                    "criterion_type": criterion.criterion_type,
-                    "criterion_text": criterion.criterion_text,
-                    "ai_result": "insufficient_data",
-                    "confidence_score": 0,
-                    "ai_rationale": f"评估异常: {str(e)}",
-                    "citations": [],
-                }
+            match = await match_agent.evaluate(
+                criterion=criterion_dict,
+                subject_info=subject_dict,
+                chunks_text=chunks_text,
+                ai_prompt=ai_prompt,
+            )
 
-            # 写入 evaluation 记录
             evaluation = CriterionEvaluation(
                 id=str(uuid.uuid4()),
                 run_id=run.id,
@@ -170,28 +156,31 @@ class ScreeningService:
                 criterion_code=criterion.criterion_code,
                 criterion_type=criterion.criterion_type,
                 criterion_text=criterion.criterion_text,
-                ai_result=result["ai_result"],
-                confidence_score=result.get("confidence_score", 50),
-                ai_rationale=result.get("ai_rationale", ""),
+                ai_result=match.result,
+                confidence_score=match.confidence,
+                ai_rationale=match.rationale,
                 review_status="unreviewed",
             )
-            self.db.add(evaluation)
-            await self.db.flush()
 
-            # 写入 citations
-            for cit in result.get("citations", []):
-                citation = EvaluationCitation(
-                    id=str(uuid.uuid4()),
-                    evaluation_id=evaluation.id,
-                    quoted_text=cit.get("quoted_text", ""),
-                    extracted_fact=cit.get("extracted_fact", ""),
-                    relevance_explanation=cit.get("relevance_explanation", ""),
+            # 用 savepoint 隔离每条标准的写入，单条失败（如脏外键）不污染整个事务
+            try:
+                async with self.db.begin_nested():
+                    self.db.add(evaluation)
+                    await self.db.flush()
+                    for cit in match.citations:
+                        self.db.add(EvaluationCitation(
+                            id=str(uuid.uuid4()),
+                            evaluation_id=evaluation.id,
+                            quoted_text=cit.quoted_text,
+                            extracted_fact=cit.extracted_fact,
+                            relevance_explanation=cit.relevance_explanation,
+                        ))
+                evaluations.append(evaluation)
+            except Exception as e:
+                logger.error(
+                    f"写入评估结果失败，跳过该标准: criterion={criterion.criterion_code}, error={str(e)}"
                 )
-                self.db.add(citation)
 
-            evaluations.append(evaluation)
-
-        # 计算总体结论
         overall_result = AIEngine.compute_overall_result(evaluations)
         overall_score = AIEngine.compute_overall_score(evaluations)
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+import json
 from datetime import datetime, timezone
 from typing import Optional, List, Tuple
 
@@ -10,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
 from app.models.audit_log import AuditLog
+from app.utils.logger import logger
 
 
 class AuditService:
@@ -92,3 +94,40 @@ class AuditService:
         items = list(result.scalars().all())
 
         return items, total
+
+
+def _to_jsonable(value: Optional[dict]) -> Optional[dict]:
+    if value is None:
+        return None
+    return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+
+async def record_audit(
+    db: AsyncSession,
+    user_id: str,
+    action_type: str,
+    target_type: Optional[str] = None,
+    target_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    subject_id: Optional[str] = None,
+    before_value: Optional[dict] = None,
+    after_value: Optional[dict] = None,
+) -> None:
+    """记录审计日志的安全包装器。审计失败绝不能阻断主业务流程。"""
+    try:
+        await AuditService(db).log(
+            user_id=user_id,
+            action_type=action_type,
+            target_type=target_type,
+            target_id=target_id,
+            project_id=project_id,
+            subject_id=subject_id,
+            before_value=_to_jsonable(before_value),
+            after_value=_to_jsonable(after_value),
+        )
+    except Exception as e:  # noqa: BLE001 — 审计失败不应阻断业务
+        logger.warning(
+            "审计日志记录失败",
+            extra={"user_id": user_id, "action_type": action_type},
+        )
+        logger.debug(f"审计日志异常详情: {e}")

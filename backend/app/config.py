@@ -25,10 +25,24 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: str = ""
     llm_model_name: str = "gpt-4o-mini"
+    # 多模态视觉模型：用于解析病例/检查报告图片与扫描件、研究方案
+    # 需为支持图像/文件输入的模型（如 gpt-4o、qwen-vl-max 等）
+    llm_vision_model_name: str = "gpt-4o"
     llm_temperature: float = 0.1
     llm_max_tokens: int = 4096
-    llm_timeout: int = 120
+    # 方案解析专用上限：入排标准是多条结构化列表，输出 token 远大于单条匹配，
+    # 上限过小会导致 JSON 被截断、漏掉后半部分（如排除标准）
+    llm_parse_max_tokens: int = 16384
+    llm_timeout: int = 110
     llm_max_retries: int = 3
+    # 重试间隔（秒）与指数退避：应对网关 524/限流（Cloudflare 建议 retry_after≈120）
+    llm_retry_delay: int = 5
+    llm_exponential_backoff: bool = True
+    # 推理强度：gpt-5 系列推理模型用 low 可显著降低延迟，避免网关 120s 超时
+    # 取值 minimal / low / medium / high；留空则用模型默认
+    llm_reasoning_effort: str = "low"
+    # 解析后是否自动触发受试者初筛匹配
+    auto_screening_after_parse: bool = True
 
     class Config:
         env_file = ".env"

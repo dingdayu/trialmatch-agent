@@ -5,6 +5,8 @@ from app.database import get_db
 from app.dependencies import get_current_user
 from app.schemas.user import UserLogin, TokenResponse, UserResponse, ChangePasswordRequest
 from app.services.auth_service import AuthService
+from app.services.audit_service import record_audit
+from app.schemas.enums import ActionType, TargetType
 from app.utils.response import APIResponse
 from app.exceptions import UnauthorizedException, ForbiddenException, BadRequestException
 from app.models.user import User
@@ -20,6 +22,13 @@ async def login(body: UserLogin, db: AsyncSession = Depends(get_db)):
     try:
         result = await service.login(body.username, body.password)
         logger.info("用户登录成功", extra={"username": body.username})
+        await record_audit(
+            db,
+            user_id=result["user"]["id"],
+            action_type=ActionType.LOGIN,
+            target_type=TargetType.USER,
+            target_id=result["user"]["id"],
+        )
         return APIResponse.success(data=result)
     except ValueError as e:
         raise UnauthorizedException(str(e))
@@ -54,9 +63,19 @@ async def refresh_token(body: dict, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/logout")
-async def logout(current_user: User = Depends(get_current_user)):
+async def logout(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """退出登录"""
     logger.info("用户退出登录", extra={"user_id": current_user.id})
+    await record_audit(
+        db,
+        user_id=current_user.id,
+        action_type=ActionType.LOGOUT,
+        target_type=TargetType.USER,
+        target_id=current_user.id,
+    )
     return APIResponse.success(data=True, message="已退出登录")
 
 
@@ -75,6 +94,14 @@ async def change_password(
             new_password=body.new_password,
         )
         logger.info("密码修改成功", extra={"user_id": current_user.id})
+        await record_audit(
+            db,
+            user_id=current_user.id,
+            action_type=ActionType.UPDATE,
+            target_type=TargetType.USER,
+            target_id=current_user.id,
+            after_value={"field": "password"},
+        )
         return APIResponse.success(data=True, message="密码修改成功")
     except ValueError as e:
         raise BadRequestException(str(e))

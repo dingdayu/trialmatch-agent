@@ -43,6 +43,27 @@ async def get_db() -> AsyncSession:  # type: ignore
 
 
 async def init_db():
-    """初始化数据库：创建所有表"""
+    """初始化数据库：创建所有表，并对既有 SQLite 库补齐新增列"""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_ensure_columns)
+
+
+def _ensure_columns(sync_conn):
+    """为既有表补齐模型新增列（SQLite 无法通过 create_all 添加列）"""
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(sync_conn)
+    expected = {
+        "eligibility_criteria": {
+            "source": "VARCHAR(16) NOT NULL DEFAULT 'manual'",
+            "review_status": "VARCHAR(16) NOT NULL DEFAULT 'confirmed'",
+        },
+    }
+    for table, columns in expected.items():
+        if not inspector.has_table(table):
+            continue
+        existing = {col["name"] for col in inspector.get_columns(table)}
+        for name, ddl in columns.items():
+            if name not in existing:
+                sync_conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))

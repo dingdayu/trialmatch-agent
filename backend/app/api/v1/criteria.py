@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import get_current_user, require_role
 from app.schemas.criteria import CriteriaCreate, CriteriaUpdate, CriteriaResponse, CriteriaBatchImport, CriteriaBatchUpdate
 from app.services.criteria_service import CriteriaService
+from app.services.audit_service import record_audit
+from app.schemas.enums import ActionType, TargetType
 from app.utils.response import APIResponse
 from app.exceptions import NotFoundException, ConflictException
 from app.models.user import User
@@ -47,6 +49,15 @@ async def create_criterion(
     service = CriteriaService(db)
     try:
         criterion = await service.create_criterion(project_id, body.model_dump())
+        await record_audit(
+            db,
+            user_id=current_user.id,
+            action_type=ActionType.CREATE,
+            target_type=TargetType.CRITERION,
+            target_id=criterion.id,
+            project_id=project_id,
+            after_value={"criterion_code": criterion.criterion_code},
+        )
         return APIResponse.success(data={"id": criterion.id})
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -77,7 +88,21 @@ async def update_criterion(
     """更新入排标准"""
     service = CriteriaService(db)
     try:
-        await service.update_criterion(criterion_id, body.model_dump(exclude_none=True))
+        changes = body.model_dump(exclude_none=True)
+        existing = await service.get_criterion(criterion_id)
+        before = {key: getattr(existing, key, None) for key in changes}
+        project_id = existing.project_id
+        await service.update_criterion(criterion_id, changes)
+        await record_audit(
+            db,
+            user_id=current_user.id,
+            action_type=ActionType.UPDATE,
+            target_type=TargetType.CRITERION,
+            target_id=criterion_id,
+            project_id=project_id,
+            before_value=before,
+            after_value=changes,
+        )
         return APIResponse.success(data=True)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -92,7 +117,19 @@ async def delete_criterion(
     """删除入排标准"""
     service = CriteriaService(db)
     try:
+        existing = await service.get_criterion(criterion_id)
+        before = {"criterion_code": existing.criterion_code, "criterion_type": existing.criterion_type}
+        project_id = existing.project_id
         await service.delete_criterion(criterion_id)
+        await record_audit(
+            db,
+            user_id=current_user.id,
+            action_type=ActionType.DELETE,
+            target_type=TargetType.CRITERION,
+            target_id=criterion_id,
+            project_id=project_id,
+            before_value=before,
+        )
         return APIResponse.success(data=True)
     except ValueError as e:
         raise NotFoundException(str(e))
@@ -115,9 +152,40 @@ async def batch_update_criteria(
             sort_orders=body.sort_orders,
             is_active=body.is_active,
         )
+        await record_audit(
+            db,
+            user_id=current_user.id,
+            action_type=ActionType.UPDATE,
+            target_type=TargetType.CRITERION,
+            project_id=project_id,
+            after_value={"action": body.action, "ids": body.ids, "updated_count": count},
+        )
         return APIResponse.success(data={"updated_count": count})
     except ValueError as e:
         raise NotFoundException(str(e))
+
+
+@router.post("/projects/{project_id}/criteria/generate-from-protocol")
+async def generate_criteria_from_protocol(
+    project_id: str,
+    file_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_role("admin", "project_manager")),
+):
+    """从已上传的研究方案自动生成入排标准草稿（需人工确认）"""
+    service = CriteriaService(db)
+    try:
+        result = await service.generate_from_protocol(project_id, file_id)
+        return APIResponse.success(
+            data={
+                "generated_count": result["generated_count"],
+                "criteria": [
+                    CriteriaResponse.model_validate(c) for c in result["criteria"]
+                ],
+            }
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/projects/{project_id}/criteria/batch-import")

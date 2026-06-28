@@ -24,6 +24,90 @@ async def run_parse_document(file_id: str, force: bool = False):
         return chunk_count
 
 
+async def run_parse_and_screen(file_id: str, force: bool = False):
+    """上传后台编排：解析文件 → 抽取实体 →（受试者文件且全部解析完成时）自动触发初筛"""
+    from app.config import get_settings
+    from app.database import async_session
+    from app.models.file import UploadedFile
+    from app.services.document_parser import DocumentParserService
+    from sqlalchemy import select, func
+
+    settings = get_settings()
+
+    async with async_session() as db:
+        file_result = await db.execute(
+            select(UploadedFile).where(UploadedFile.id == file_id)
+        )
+        file_record = file_result.scalar_one_or_none()
+        if not file_record:
+            logger.warning(f"待解析文件不存在: {file_id}")
+            return
+
+        subject_id = file_record.subject_id
+        file_scope = file_record.file_scope
+
+        parser = DocumentParserService(db)
+        try:
+            await parser.parse_file(file_id, force=force)
+            await parser.extract_entities(file_id)
+        except Exception as e:
+            logger.error(f"后台解析失败: file={file_id}, error={str(e)}")
+            return
+
+    if file_scope != "subject_data" or not subject_id:
+        return
+    if not settings.auto_screening_after_parse:
+        return
+
+    async with async_session() as db:
+        pending = await db.execute(
+            select(func.count()).select_from(UploadedFile).where(
+                UploadedFile.subject_id == subject_id,
+                UploadedFile.parse_status != "completed",
+            )
+        )
+        if (pending.scalar() or 0) > 0:
+            return
+
+    await _auto_screen_subject(subject_id)
+
+
+async def _auto_screen_subject(subject_id: str):
+    """受试者文件全部解析完成后自动启动并执行一次初筛"""
+    from app.database import async_session
+    from app.models.subject import Subject
+    from app.models.screening_run import ScreeningRun
+    from app.services.screening_service import ScreeningService
+    from sqlalchemy import select
+
+    async with async_session() as db:
+        subject_result = await db.execute(select(Subject).where(Subject.id == subject_id))
+        subject = subject_result.scalar_one_or_none()
+        if not subject:
+            return
+
+        running = await db.execute(
+            select(ScreeningRun).where(
+                ScreeningRun.subject_id == subject_id,
+                ScreeningRun.status.in_(["queued", "running"]),
+            )
+        )
+        if running.scalar_one_or_none():
+            return
+
+        service = ScreeningService(db)
+        try:
+            run = await service.start_screening(
+                subject_id=subject_id,
+                user_id=subject.created_by or "system",
+            )
+        except ValueError as e:
+            logger.info(f"自动初筛跳过: subject={subject_id}, reason={str(e)}")
+            return
+
+    await run_single_screening(run.id)
+
+
 async def run_single_screening(run_id: str):
     """执行单个 AI 初筛任务（异步版本）"""
     from app.database import async_session

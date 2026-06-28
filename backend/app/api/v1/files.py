@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
@@ -10,11 +11,26 @@ from app.database import get_db
 from app.dependencies import get_current_user
 from app.schemas.file import FileResponse, FileListResponse, ParseTriggerRequest, ParseTriggerResponse, ChunkResponse
 from app.services.file_service import FileService
+from app.services.audit_service import record_audit
+from app.schemas.enums import ActionType, TargetType
+from app.tasks.parse_document import run_parse_and_screen
 from app.utils.response import APIResponse
+from app.utils.logger import logger
 from app.exceptions import NotFoundException
 from app.models.user import User
 
 router = APIRouter()
+
+
+def _schedule_parse(file_id: str, force: bool = False) -> None:
+    """在事件循环中后台触发解析+实体抽取（+受试者文件自动初筛）"""
+    async def _runner():
+        try:
+            await run_parse_and_screen(file_id, force=force)
+        except Exception as e:
+            logger.error(f"后台解析编排异常: file={file_id}, error={str(e)}")
+
+    asyncio.create_task(_runner())
 
 
 @router.post("/projects/{project_id}/files")
@@ -38,6 +54,17 @@ async def upload_project_file(
             user_id=current_user.id,
             description=description,
         )
+        await record_audit(
+            db,
+            user_id=current_user.id,
+            action_type=ActionType.UPLOAD,
+            target_type=TargetType.FILE,
+            target_id=result.id,
+            project_id=project_id,
+            after_value={"file_name": result.file_name, "file_type": file_type, "file_scope": "project_protocol"},
+        )
+        if auto_parse:
+            _schedule_parse(result.id)
         return APIResponse.success(data=FileResponse.model_validate(result))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -64,6 +91,18 @@ async def upload_subject_file(
             user_id=current_user.id,
             description=description,
         )
+        await record_audit(
+            db,
+            user_id=current_user.id,
+            action_type=ActionType.UPLOAD,
+            target_type=TargetType.FILE,
+            target_id=result.id,
+            project_id=result.project_id,
+            subject_id=subject_id,
+            after_value={"file_name": result.file_name, "file_type": file_type, "file_scope": "subject_data"},
+        )
+        if auto_parse:
+            _schedule_parse(result.id)
         return APIResponse.success(data=FileResponse.model_validate(result))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -126,7 +165,21 @@ async def delete_file(
     """删除文件"""
     service = FileService(db)
     try:
+        existing = await service.get_file(file_id)
+        before = {"file_name": existing.file_name, "file_scope": existing.file_scope}
+        project_id = existing.project_id
+        subject_id = existing.subject_id
         await service.delete_file(file_id)
+        await record_audit(
+            db,
+            user_id=current_user.id,
+            action_type=ActionType.DELETE,
+            target_type=TargetType.FILE,
+            target_id=file_id,
+            project_id=project_id,
+            subject_id=subject_id,
+            before_value=before,
+        )
         return APIResponse.success(data=True)
     except ValueError as e:
         raise NotFoundException(str(e))
@@ -142,6 +195,16 @@ async def download_file(
     service = FileService(db)
     try:
         file_record = await service.download_file(file_id)
+        await record_audit(
+            db,
+            user_id=current_user.id,
+            action_type=ActionType.DOWNLOAD,
+            target_type=TargetType.FILE,
+            target_id=file_id,
+            project_id=file_record.project_id,
+            subject_id=file_record.subject_id,
+            after_value={"file_name": file_record.file_name},
+        )
         return FastAPIFileResponse(
             path=file_record.file_path,
             filename=file_record.file_name,
@@ -158,11 +221,15 @@ async def trigger_parse(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """触发文件解析（当前为同步占位，后续对接 Celery）"""
+    """触发文件解析（后台异步执行，前端可轮询 parse_status）"""
     service = FileService(db)
     try:
         file_record = await service.get_file(file_id)
-        # TODO: 提交 Celery 解析任务
+        file_record.parse_status = "pending"
+        await db.commit()
+
+        _schedule_parse(file_id, force=body.force)
+
         return APIResponse.success(
             data=ParseTriggerResponse(
                 file_id=file_id,

@@ -73,27 +73,33 @@ class DocumentParserService:
             raise ValueError(f"不支持的文件类型: {ext}")
 
     async def _parse_pdf(self, file_path: str) -> List[dict]:
-        """解析 PDF 文件"""
+        """解析 PDF：文字页直接提取，扫描页走多模态视觉解析"""
         from app.utils.pdf_parser import PDFParser
+        from app.agents import CaseParsingAgent
 
         pages = PDFParser.parse(file_path)
+        agent = CaseParsingAgent()
         chunks = []
         for page in pages:
             if page.is_scanned:
-                # 扫描件走 OCR
-                try:
-                    from app.utils.ocr_parser import OCRParser
-                    text = OCRParser.recognize_image(page._image_bytes)
-                except RuntimeError:
-                    text = f"[扫描件 OCR 不可用，第 {page.page_no} 页]"
+                image_bytes = getattr(page, "_image_bytes", None)
+                if image_bytes:
+                    result = await agent.parse_image(image_bytes)
+                    text = result.content
+                    entities = result.entities.model_dump()
+                else:
+                    text = f"[第 {page.page_no} 页无法提取内容]"
+                    entities = None
             else:
                 text = page.text
+                entities = None
 
             chunks.append({
                 "page_no": page.page_no,
                 "chunk_index": 0,
                 "content": text,
                 "bbox": None,
+                "extracted_entities": entities,
             })
         return chunks
 
@@ -113,20 +119,20 @@ class DocumentParserService:
         ]
 
     async def _parse_image(self, file_path: str) -> List[dict]:
-        """解析图片文件"""
-        try:
-            from app.utils.ocr_parser import OCRParser
-            with open(file_path, "rb") as f:
-                image_bytes = f.read()
-            text = OCRParser.recognize_image(image_bytes)
-        except RuntimeError:
-            text = "[图片 OCR 不可用]"
+        """解析图片文件：多模态视觉模型转写 + 实体抽取"""
+        from app.agents import CaseParsingAgent
+
+        with open(file_path, "rb") as f:
+            image_bytes = f.read()
+
+        result = await CaseParsingAgent().parse_image(image_bytes)
 
         return [{
             "page_no": 1,
             "chunk_index": 0,
-            "content": text,
+            "content": result.content,
             "bbox": None,
+            "extracted_entities": result.entities.model_dump(),
         }]
 
     async def _save_chunks(self, file_record: UploadedFile, chunks: List[dict]):
@@ -148,15 +154,16 @@ class DocumentParserService:
                 chunk_index=c["chunk_index"],
                 content=c["content"],
                 bbox=c.get("bbox"),
-                extracted_entities=None,
+                extracted_entities=c.get("extracted_entities"),
             )
             self.db.add(chunk)
 
         await self.db.flush()
 
     async def extract_entities(self, file_id: str) -> int:
-        """对已解析的 chunks 调用 LLM 进行实体抽取"""
+        """对尚未抽取实体的文本 chunk 调用多模态 Agent 补充结构化实体"""
         from app.models.document_chunk import DocumentChunk
+        from app.agents import CaseParsingAgent
 
         result = await self.db.execute(
             select(DocumentChunk).where(DocumentChunk.file_id == file_id)
@@ -167,44 +174,19 @@ class DocumentParserService:
         if not chunks:
             return 0
 
+        agent = CaseParsingAgent()
         updated = 0
         for chunk in chunks:
+            if chunk.extracted_entities:
+                continue
+            if not chunk.content or not chunk.content.strip():
+                continue
             try:
-                entities = await self._call_llm_entity_extraction(chunk.content)
-                chunk.extracted_entities = entities
+                parsed = await agent.parse_text(chunk.content)
+                chunk.extracted_entities = parsed.entities.model_dump()
                 updated += 1
             except Exception as e:
                 logger.warning(f"实体抽取失败 chunk={chunk.id}: {str(e)}")
 
         await self.db.commit()
         return updated
-
-    async def _call_llm_entity_extraction(self, text: str) -> dict:
-        """调用 LLM 从文本中抽取结构化实体"""
-        try:
-            from app.services.ai_engine import LLMClient
-            llm = LLMClient()
-
-            prompt = f"""从以下医疗文本中提取结构化信息，仅输出 JSON：
-
-{{
-    "age": "年龄（数字）或 null",
-    "birth_date": "出生日期或 null",
-    "gender": "男/女 或 null",
-    "diagnosis": "主要诊断或 null",
-    "pathology": "病理类型或 null",
-    "ecog_score": "ECOG 评分或 null",
-    "lab_results": ["异常实验室检查结果列表"],
-    "treatments": ["既往治疗方案列表"],
-    "infections": ["感染病史列表"],
-    "autoimmune_diseases": ["自身免疫疾病列表"]
-}}
-
-文本内容：
-{text[:3000]}
-"""
-            result = await llm.chat(prompt)
-            import json
-            return json.loads(result) if isinstance(result, str) else result
-        except Exception:
-            return {}

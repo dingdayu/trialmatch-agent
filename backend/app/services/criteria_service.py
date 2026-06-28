@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import os
 from typing import Optional, List
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
 from app.models.criteria import EligibilityCriterion
+from app.models.file import UploadedFile
+from app.utils.logger import logger
 
 
 class CriteriaService:
@@ -85,6 +88,133 @@ class CriteriaService:
             raise ValueError(f"该标准已有 {count} 条匹配结果，无法删除")
         await self.db.delete(criterion)
         await self.db.commit()
+
+    async def generate_from_protocol(
+        self, project_id: str, file_id: Optional[str] = None
+    ) -> dict:
+        """从研究方案文件解析并生成入排标准草稿（AI 生成，需人工确认）"""
+        logger.info(
+            f"[入排解析] 收到生成请求: project_id={project_id}, file_id={file_id or '(最新方案)'}"
+        )
+        protocol_file = await self._resolve_protocol_file(project_id, file_id)
+        if not protocol_file:
+            logger.warning(f"[入排解析] 项目 {project_id} 未找到研究方案文件")
+            raise ValueError("未找到该项目的研究方案文件，请先上传方案")
+
+        logger.info(
+            f"[入排解析] 命中方案文件: id={protocol_file.id}, "
+            f"name={protocol_file.file_name}, path={protocol_file.file_path}"
+        )
+
+        text_content, file_bytes, file_ext = self._load_protocol_payload(protocol_file)
+        logger.info(
+            f"[入排解析] 载荷加载: ext={file_ext}, "
+            f"text={'有' if text_content else '无'}, "
+            f"bytes={len(file_bytes) if file_bytes else 0}"
+        )
+
+        from app.agents import ProtocolParsingAgent
+
+        agent = ProtocolParsingAgent()
+        generated = await agent.parse(
+            text_content=text_content,
+            file_bytes=file_bytes,
+            file_ext=file_ext,
+        )
+
+        if not generated:
+            logger.warning(f"[入排解析] 项目 {project_id} 未生成任何入排标准")
+            return {"generated_count": 0, "criteria": []}
+
+        existing_codes = await self._existing_codes(project_id)
+        next_inclusion = self._next_index(existing_codes, "I")
+        next_exclusion = self._next_index(existing_codes, "E")
+
+        created: List[EligibilityCriterion] = []
+        for item in generated:
+            ctype = "inclusion" if item.criterion_type == "inclusion" else "exclusion"
+            if ctype == "inclusion":
+                code = f"I-{next_inclusion:02d}"
+                next_inclusion += 1
+            else:
+                code = f"E-{next_exclusion:02d}"
+                next_exclusion += 1
+
+            if code in existing_codes:
+                continue
+            existing_codes.add(code)
+
+            criterion = EligibilityCriterion(
+                project_id=project_id,
+                criterion_code=code,
+                criterion_type=ctype,
+                criterion_text=item.criterion_text,
+                criterion_explanation=item.criterion_explanation or None,
+                ai_instruction=item.ai_instruction or None,
+                required_fields=item.required_fields or [],
+                sort_order=len(existing_codes),
+                is_active=False,
+                source="ai_generated",
+                review_status="draft",
+            )
+            self.db.add(criterion)
+            created.append(criterion)
+
+        await self.db.commit()
+        for c in created:
+            await self.db.refresh(c)
+
+        logger.info(
+            f"[入排解析] 落库完成: 方案 {protocol_file.id} 生成草稿 {len(created)} 条 "
+            f"(source=ai_generated, review_status=draft, is_active=False)"
+        )
+        return {"generated_count": len(created), "criteria": created}
+
+    async def _resolve_protocol_file(
+        self, project_id: str, file_id: Optional[str]
+    ) -> Optional[UploadedFile]:
+        query = select(UploadedFile).where(
+            UploadedFile.project_id == project_id,
+            UploadedFile.file_scope == "project_protocol",
+        )
+        if file_id:
+            query = query.where(UploadedFile.id == file_id)
+        else:
+            query = query.order_by(UploadedFile.uploaded_at.desc())
+        result = await self.db.execute(query.limit(1))
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    def _load_protocol_payload(protocol_file: UploadedFile):
+        ext = os.path.splitext(protocol_file.file_name or "")[1].lower()
+        if not os.path.exists(protocol_file.file_path):
+            raise ValueError("研究方案文件已丢失，请重新上传")
+
+        if ext in (".pdf", ".jpg", ".jpeg", ".png", ".doc", ".docx"):
+            with open(protocol_file.file_path, "rb") as f:
+                return None, f.read(), ext
+
+        with open(protocol_file.file_path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read(), None, ext
+
+    async def _existing_codes(self, project_id: str) -> set:
+        result = await self.db.execute(
+            select(EligibilityCriterion.criterion_code).where(
+                EligibilityCriterion.project_id == project_id
+            )
+        )
+        return {row[0] for row in result.all()}
+
+    @staticmethod
+    def _next_index(existing_codes: set, prefix: str) -> int:
+        max_idx = 0
+        for code in existing_codes:
+            if code.startswith(f"{prefix}-"):
+                try:
+                    max_idx = max(max_idx, int(code.split("-")[1]))
+                except (ValueError, IndexError):
+                    continue
+        return max_idx + 1
 
     async def batch_import(self, project_id: str, criteria_data: List[dict]) -> dict:
         """批量导入入排标准"""

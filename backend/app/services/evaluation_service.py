@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional, List
+from typing import Any, Optional, List
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
@@ -23,7 +23,7 @@ class EvaluationService:
         criterion_type: Optional[str] = None,
         ai_result: Optional[str] = None,
         review_status: Optional[str] = None,
-    ) -> Optional[dict]:
+    ) -> Optional[dict[str, Any]]:
         """获取受试者最新一次分析的匹配结果"""
         # 找到最新的 screening_run
         run_result = await self.db.execute(
@@ -68,13 +68,28 @@ class EvaluationService:
         evaluations = list(result.scalars().all())
 
         # 计算 citation_count
+        evaluation_items = []
         for ev in evaluations:
             count_result = await self.db.execute(
                 select(func.count()).select_from(EvaluationCitation).where(
                     EvaluationCitation.evaluation_id == ev.id
                 )
             )
-            ev._citation_count = count_result.scalar() or 0
+            citation_count = count_result.scalar() or 0
+            evaluation_items.append({
+                "id": ev.id,
+                "criterion_id": ev.criterion_id,
+                "criterion_code": ev.criterion_code,
+                "criterion_type": ev.criterion_type,
+                "criterion_text": ev.criterion_text,
+                "ai_result": ev.ai_result,
+                "confidence_score": ev.confidence_score,
+                "ai_rationale": ev.ai_rationale,
+                "citation_count": citation_count,
+                "manual_result": ev.manual_result,
+                "manual_comment": ev.manual_comment,
+                "review_status": ev.review_status,
+            })
 
         # 汇总统计
         summary = self._build_summary(evaluations)
@@ -83,22 +98,42 @@ class EvaluationService:
             "run_id": latest_run.id,
             "subject": {
                 "id": subject.id,
+                "project_id": subject.project_id,
                 "subject_no": subject.subject_no,
                 "site_name": subject.site_name,
                 "gender": subject.gender,
                 "age": subject.age,
+                "birth_year": subject.birth_year,
                 "diagnosis": subject.diagnosis,
+                "remark": subject.remark,
+                "material_count": subject.material_count,
+                "screening_status": subject.screening_status,
+                "overall_result": subject.overall_result,
+                "created_at": subject.created_at.isoformat() if subject.created_at else None,
+                "updated_at": subject.updated_at.isoformat() if subject.updated_at else None,
             },
             "project": {
                 "id": project.id if project else None,
                 "project_no": project.project_no if project else None,
                 "study_name": project.study_name if project else None,
+                "study_short_name": project.study_short_name if project else None,
+                "indication": project.indication if project else None,
+                "phase": project.phase if project else None,
+                "sponsor": project.sponsor if project else None,
+                "principal_investigator": project.principal_investigator if project else None,
+                "project_manager": project.project_manager if project else None,
+                "status": project.status if project else None,
+                "description": project.description if project else None,
+                "ai_prompt": project.ai_prompt if project else None,
+                "created_by": project.created_by if project else None,
+                "created_at": project.created_at.isoformat() if project and project.created_at else None,
+                "updated_at": project.updated_at.isoformat() if project and project.updated_at else None,
             },
             "summary": summary,
-            "evaluations": evaluations,
+            "evaluations": evaluation_items,
         }
 
-    async def get_evaluation_detail(self, evaluation_id: str) -> Optional[CriterionEvaluation]:
+    async def get_evaluation_detail(self, evaluation_id: str) -> Optional[dict[str, Any]]:
         """获取单条匹配结果详情（含证据引用）"""
         result = await self.db.execute(
             select(CriterionEvaluation).where(CriterionEvaluation.id == evaluation_id)
@@ -110,8 +145,41 @@ class EvaluationService:
                     EvaluationCitation.evaluation_id == evaluation_id
                 )
             )
-            evaluation._citations = list(citations_result.scalars().all())
-        return evaluation
+            citations = list(citations_result.scalars().all())
+            return {
+                "id": evaluation.id,
+                "run_id": evaluation.run_id,
+                "project_id": evaluation.project_id,
+                "subject_id": evaluation.subject_id,
+                "criterion_id": evaluation.criterion_id,
+                "criterion_code": evaluation.criterion_code,
+                "criterion_type": evaluation.criterion_type,
+                "criterion_text": evaluation.criterion_text,
+                "criterion_explanation": None,
+                "ai_result": evaluation.ai_result,
+                "confidence_score": evaluation.confidence_score,
+                "ai_rationale": evaluation.ai_rationale,
+                "manual_result": evaluation.manual_result,
+                "manual_comment": evaluation.manual_comment,
+                "review_status": evaluation.review_status,
+                "reviewer_id": evaluation.reviewer_id,
+                "reviewed_at": evaluation.reviewed_at.isoformat() if evaluation.reviewed_at else None,
+                "citations": [
+                    {
+                        "id": citation.id,
+                        "file_id": citation.file_id,
+                        "file_name": citation.file_name,
+                        "file_type": citation.file_type,
+                        "page_no": citation.page_no,
+                        "chunk_id": citation.chunk_id,
+                        "quoted_text": citation.quoted_text,
+                        "extracted_fact": citation.extracted_fact,
+                        "relevance_explanation": citation.relevance_explanation,
+                    }
+                    for citation in citations
+                ],
+            }
+        return None
 
     async def manual_review(
         self,
@@ -152,7 +220,7 @@ class EvaluationService:
             count += 1
         return count
 
-    def _build_summary(self, evaluations: List[CriterionEvaluation]) -> dict:
+    def _build_summary(self, evaluations: List[CriterionEvaluation]) -> dict[str, Any]:
         """构建初筛汇总统计"""
         inclusion_pass = 0
         inclusion_fail = 0

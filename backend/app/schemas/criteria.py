@@ -27,6 +27,7 @@ class CriteriaUpdate(BaseModel):
     required_fields: Optional[List[str]] = None
     sort_order: Optional[int] = None
     is_active: Optional[bool] = None
+    review_status: Optional[str] = Field(None, pattern="^(draft|confirmed)$")
 
 
 class CriteriaResponse(BaseModel):
@@ -41,6 +42,8 @@ class CriteriaResponse(BaseModel):
     required_fields: Optional[List] = None
     sort_order: int
     is_active: bool
+    source: str = "manual"
+    review_status: str = "confirmed"
     created_at: datetime
     updated_at: datetime
 

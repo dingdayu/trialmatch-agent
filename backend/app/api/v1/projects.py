@@ -9,6 +9,8 @@ from app.database import get_db
 from app.dependencies import get_current_user, require_role
 from app.schemas.project import ProjectCreate, ProjectUpdate, ProjectResponse, ProjectListResponse
 from app.services.project_service import ProjectService
+from app.services.audit_service import record_audit
+from app.schemas.enums import ActionType, TargetType
 from app.utils.response import APIResponse
 from app.models.user import User
 
@@ -51,6 +53,15 @@ async def create_project(
     service = ProjectService(db)
     try:
         project = await service.create_project(body.model_dump(), current_user.id)
+        await record_audit(
+            db,
+            user_id=current_user.id,
+            action_type=ActionType.CREATE,
+            target_type=TargetType.PROJECT,
+            target_id=project.id,
+            project_id=project.id,
+            after_value={"project_no": project.project_no},
+        )
         return APIResponse.success(
             data={"id": project.id, "project_no": project.project_no}
         )
@@ -83,7 +94,20 @@ async def update_project(
     """更新项目"""
     service = ProjectService(db)
     try:
-        await service.update_project(project_id, body.model_dump(exclude_none=True))
+        changes = body.model_dump(exclude_none=True)
+        existing = await service.get_project(project_id)
+        before = {key: getattr(existing, key, None) for key in changes}
+        await service.update_project(project_id, changes)
+        await record_audit(
+            db,
+            user_id=current_user.id,
+            action_type=ActionType.UPDATE,
+            target_type=TargetType.PROJECT,
+            target_id=project_id,
+            project_id=project_id,
+            before_value=before,
+            after_value=changes,
+        )
         return APIResponse.success(data=True)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -98,7 +122,18 @@ async def delete_project(
     """删除项目"""
     service = ProjectService(db)
     try:
+        existing = await service.get_project(project_id)
+        before = {"project_no": existing.project_no, "study_name": existing.study_name}
         await service.delete_project(project_id)
+        await record_audit(
+            db,
+            user_id=current_user.id,
+            action_type=ActionType.DELETE,
+            target_type=TargetType.PROJECT,
+            target_id=project_id,
+            project_id=project_id,
+            before_value=before,
+        )
         return APIResponse.success(data=True)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))

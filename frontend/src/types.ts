@@ -75,8 +75,15 @@ export type Criterion = {
   required_fields?: string[] | null
   sort_order: number
   is_active: boolean
+  source?: string
+  review_status?: string
   created_at: string
   updated_at: string
+}
+
+export type GenerateCriteriaResult = {
+  generated_count: number
+  criteria: Criterion[]
 }
 
 export type UploadedFile = {

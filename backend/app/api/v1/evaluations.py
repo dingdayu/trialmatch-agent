@@ -14,6 +14,8 @@ from app.schemas.evaluation import (
     CitationResponse,
 )
 from app.services.evaluation_service import EvaluationService
+from app.services.audit_service import record_audit
+from app.schemas.enums import ActionType, TargetType
 from app.repositories.evaluation_repo import EvaluationRepository
 from app.utils.response import APIResponse
 from app.models.user import User
@@ -76,12 +78,24 @@ async def manual_review(
     """人工复核单条标准"""
     service = EvaluationService(db)
     try:
-        await service.manual_review(
+        evaluation = await service.manual_review(
             evaluation_id=evaluation_id,
             manual_result=body.manual_result,
             manual_comment=body.manual_comment,
             review_status=body.review_status,
             reviewer_id=current_user.id,
+        )
+        await record_audit(
+            db,
+            user_id=current_user.id,
+            action_type=ActionType.MANUAL_REVIEW,
+            target_type=TargetType.EVALUATION,
+            target_id=evaluation_id,
+            subject_id=evaluation.subject_id,
+            after_value={
+                "manual_result": body.manual_result,
+                "review_status": body.review_status,
+            },
         )
         return APIResponse.success(data={
             "evaluation_id": evaluation_id,
@@ -104,6 +118,15 @@ async def batch_review(
         evaluation_ids=body.evaluation_ids,
         manual_comment=body.manual_comment,
         reviewer_id=current_user.id,
+    )
+    await record_audit(
+        db,
+        user_id=current_user.id,
+        action_type=ActionType.BATCH_REVIEW,
+        target_type=TargetType.SUBJECT,
+        target_id=subject_id,
+        subject_id=subject_id,
+        after_value={"reviewed_count": count, "evaluation_ids": body.evaluation_ids},
     )
     return APIResponse.success(data={"reviewed_count": count})
 

@@ -8,6 +8,7 @@ import {
   fetchAuditLogs,
   fetchCriteria,
   fetchEvaluationDetail,
+  fetchFile,
   fetchFiles,
   fetchHealth,
   fetchLatestEvaluations,
@@ -16,11 +17,14 @@ import {
   fetchProject,
   fetchSubject,
   fetchSubjects,
+  generateCriteriaFromProtocol,
   getStoredToken,
   getStoredUser,
   login,
+  executeScreening,
   startScreening,
   submitManualReview,
+  updateCriterion,
   uploadProjectFile,
   uploadSubjectFile,
   updateProject,
@@ -80,6 +84,20 @@ function navigate(path: string): void {
   window.location.hash = path
 }
 
+const PARSE_POLL_INTERVAL_MS = 2000
+const PARSE_POLL_MAX_ATTEMPTS = 60
+
+async function pollParseStatus(fileId: string): Promise<string> {
+  for (let attempt = 0; attempt < PARSE_POLL_MAX_ATTEMPTS; attempt += 1) {
+    const file = await fetchFile(fileId)
+    if (file.parse_status === "completed" || file.parse_status === "failed") {
+      return file.parse_status
+    }
+    await new Promise((resolve) => setTimeout(resolve, PARSE_POLL_INTERVAL_MS))
+  }
+  return "timeout"
+}
+
 export function App() {
   const [route, setRoute] = useState<Route>(() => parseRoute())
   const [user, setUser] = useState<User | null>(() => getStoredUser())
@@ -88,6 +106,7 @@ export function App() {
   const [subject, setSubject] = useState<Subject | null>(null)
   const [health, setHealth] = useState<{ status: string; database?: string; version?: string } | null>(null)
   const [loading, setLoading] = useState(false)
+  const [parsing, setParsing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
 
@@ -123,12 +142,13 @@ export function App() {
   const loadProjectWorkspace = useCallback(async (projectId: string) => {
     setLoading(true)
     setError(null)
+    setData((current) => ({ ...current, files: [], evaluations: [], selectedEvaluation: null }))
     try {
       const [projectData, subjectsPage, criteriaData, filesPage] = await Promise.all([
         fetchProject(projectId),
         fetchSubjects(projectId),
         fetchCriteria(projectId),
-        fetchFiles(projectId),
+        fetchFiles(projectId, undefined, "project_protocol"),
       ])
       setProject(projectData)
       setData((current) => ({
@@ -144,9 +164,12 @@ export function App() {
     }
   }, [])
 
-  const loadSubjectWorkspace = useCallback(async (subjectId: string) => {
-    setLoading(true)
-    setError(null)
+  const loadSubjectWorkspace = useCallback(async (subjectId: string, silent = false) => {
+    if (!silent) {
+      setLoading(true)
+      setError(null)
+      setData((current) => ({ ...current, files: [], evaluations: [], selectedEvaluation: null }))
+    }
     try {
       const latest = await fetchLatestEvaluations(subjectId)
       const subjectData = latest.subject ?? await fetchSubject(subjectId)
@@ -154,7 +177,7 @@ export function App() {
       let filesPage: UploadedFile[] = []
       let selectedEvaluation: EvaluationDetail | null = null
 
-      const files = await fetchFiles(projectData.id, subjectData.id)
+      const files = await fetchFiles(projectData.id, subjectData.id, "subject_data")
       filesPage = files.items
       const firstReview = latest.evaluations.find(
         (item) => item.ai_result === "manual_review" || item.ai_result === "insufficient_data",
@@ -169,12 +192,16 @@ export function App() {
         ...current,
         files: filesPage,
         evaluations: latest.evaluations,
-        selectedEvaluation,
+        selectedEvaluation: silent ? (current.selectedEvaluation ?? selectedEvaluation) : selectedEvaluation,
       }))
     } catch (err) {
-      setError(err instanceof Error ? err.message : "加载初筛结果失败")
+      if (!silent) {
+        setError(err instanceof Error ? err.message : "加载初筛结果失败")
+      }
     } finally {
-      setLoading(false)
+      if (!silent) {
+        setLoading(false)
+      }
     }
   }, [])
 
@@ -205,6 +232,20 @@ export function App() {
       void loadAudit()
     }
   }, [loadAudit, loadProjectWorkspace, loadProjects, loadSubjectWorkspace, route])
+
+  useEffect(() => {
+    if (route.view !== "subject" || route.subjectId === undefined) {
+      return
+    }
+    const inProgress = subject?.screening_status === "screening" || subject?.screening_status === "parsing" || subject?.screening_status === "matching"
+    if (!inProgress) {
+      return
+    }
+    const timer = window.setInterval(() => {
+      void loadSubjectWorkspace(route.subjectId ?? "", true)
+    }, 4000)
+    return () => window.clearInterval(timer)
+  }, [route.view, route.subjectId, subject?.screening_status, loadSubjectWorkspace])
 
   const handleLogout = () => {
     clearSession()
@@ -271,6 +312,7 @@ export function App() {
           <ErrorBanner message={error} />
           {notice === null ? null : <div className="notice-banner">{notice}</div>}
           {loading ? <div className="loading-bar">正在从后端同步数据…</div> : null}
+          {parsing ? <div className="loading-bar">正在解析处理上传的文件，请稍候…</div> : null}
           {route.view === "projects" ? (
             <ProjectsPage
               projects={data.projects}
@@ -288,9 +330,15 @@ export function App() {
               criteria={data.criteria}
               files={data.files}
               onCreateSubject={async (form) => {
-                await createSubject(route.projectId ?? "", form)
-                setNotice("受试者已创建")
-                await loadProjectWorkspace(route.projectId ?? "")
+                setError(null)
+                try {
+                  await createSubject(route.projectId ?? "", form)
+                  setNotice("受试者已创建")
+                  await loadProjectWorkspace(route.projectId ?? "")
+                } catch (err) {
+                  setError(err instanceof Error ? err.message : "新增受试者失败")
+                  throw err
+                }
               }}
               onCreateCriterion={async (form) => {
                 await createCriterion(route.projectId ?? "", form)
@@ -303,9 +351,64 @@ export function App() {
                 await loadProjectWorkspace(route.projectId ?? "")
               }}
               onUploadProjectFile={async (file, fileType) => {
-                await uploadProjectFile(route.projectId ?? "", file, fileType)
-                setNotice("项目文件已上传")
-                await loadProjectWorkspace(route.projectId ?? "")
+                const projectId = route.projectId ?? ""
+                const uploaded = await uploadProjectFile(projectId, file, fileType)
+                setNotice("文件已上传，正在解析中…")
+                setParsing(true)
+                try {
+                  const status = await pollParseStatus(uploaded.id)
+                  if (status === "completed") {
+                    setNotice("文件解析完成")
+                  } else if (status === "failed") {
+                    setError("文件解析失败，请重试")
+                  } else {
+                    setNotice("解析耗时较长，请稍后刷新查看")
+                  }
+                } finally {
+                  setParsing(false)
+                }
+                await loadProjectWorkspace(projectId)
+              }}
+              onGenerateCriteria={async () => {
+                const projectId = route.projectId ?? ""
+                setError(null)
+                try {
+                  const result = await generateCriteriaFromProtocol(projectId)
+                  if (result.generated_count === 0) {
+                    setNotice("未能从方案中识别入排标准，请检查方案文件")
+                  } else {
+                    setNotice(`AI 已生成 ${result.generated_count} 条入排标准草稿，请确认`)
+                  }
+                  await loadProjectWorkspace(projectId)
+                } catch (err) {
+                  setError(err instanceof Error ? err.message : "AI 生成入排标准失败")
+                }
+              }}
+              onConfirmCriterion={async (criterionId) => {
+                setError(null)
+                try {
+                  await updateCriterion(criterionId, { review_status: "confirmed", is_active: true })
+                  setNotice("已确认采用该入排标准")
+                  await loadProjectWorkspace(route.projectId ?? "")
+                } catch (err) {
+                  setError(err instanceof Error ? err.message : "确认入排标准失败")
+                  throw err
+                }
+              }}
+              onConfirmAllCriteria={async (criterionIds) => {
+                setError(null)
+                try {
+                  await Promise.all(
+                    criterionIds.map((id) =>
+                      updateCriterion(id, { review_status: "confirmed", is_active: true }),
+                    ),
+                  )
+                  setNotice(`已全部采用 ${criterionIds.length} 条入排标准`)
+                  await loadProjectWorkspace(route.projectId ?? "")
+                } catch (err) {
+                  setError(err instanceof Error ? err.message : "全部采用失败")
+                  throw err
+                }
               }}
             />
           ) : null}
@@ -321,9 +424,22 @@ export function App() {
                 setData((current) => ({ ...current, selectedEvaluation: detail }))
               }}
               onStartScreening={async () => {
-                await startScreening(route.subjectId ?? "")
-                setNotice("AI 初筛任务已创建")
-                await loadSubjectWorkspace(route.subjectId ?? "")
+                const subjectId = route.subjectId ?? ""
+                setError(null)
+                setNotice("AI 初筛进行中，正在逐条匹配入排标准…")
+                setParsing(true)
+                try {
+                  const run = await startScreening(subjectId)
+                  const result = await executeScreening(subjectId, run.id)
+                  setNotice(
+                    `AI 初筛完成：共评估 ${result.evaluation_count ?? 0} 条标准`,
+                  )
+                  await loadSubjectWorkspace(subjectId)
+                } catch (err) {
+                  setError(err instanceof Error ? err.message : "启动 AI 初筛失败")
+                } finally {
+                  setParsing(false)
+                }
               }}
               onExport={async () => {
                 const task = await exportReport(route.subjectId ?? "")
@@ -339,9 +455,23 @@ export function App() {
                 await loadSubjectWorkspace(route.subjectId ?? "")
               }}
               onUploadSubjectFile={async (file, fileType) => {
-                await uploadSubjectFile(route.subjectId ?? "", file, fileType)
-                setNotice("受试者资料已上传")
-                await loadSubjectWorkspace(route.subjectId ?? "")
+                const subjectId = route.subjectId ?? ""
+                const uploaded = await uploadSubjectFile(subjectId, file, fileType)
+                setNotice("资料已上传，正在多模态解析并触发入排匹配…")
+                setParsing(true)
+                try {
+                  const status = await pollParseStatus(uploaded.id)
+                  if (status === "completed") {
+                    setNotice("解析完成，AI 入排匹配结果已更新")
+                  } else if (status === "failed") {
+                    setError("文件解析失败，请重试")
+                  } else {
+                    setNotice("解析耗时较长，请稍后刷新查看")
+                  }
+                } finally {
+                  setParsing(false)
+                }
+                await loadSubjectWorkspace(subjectId)
               }}
             />
           ) : null}
@@ -567,6 +697,9 @@ function ProjectWorkspace({
   onCreateCriterion,
   onUpdatePrompt,
   onUploadProjectFile,
+  onGenerateCriteria,
+  onConfirmCriterion,
+  onConfirmAllCriteria,
 }: {
   readonly project: Project | null
   readonly subjects: Subject[]
@@ -576,12 +709,19 @@ function ProjectWorkspace({
   readonly onCreateCriterion: (form: { criterion_code: string; criterion_type: "inclusion" | "exclusion"; criterion_text: string; ai_instruction?: string; sort_order: number }) => Promise<void>
   readonly onUpdatePrompt: (aiPrompt: string) => Promise<void>
   readonly onUploadProjectFile: (file: File, fileType: string) => Promise<void>
+  readonly onGenerateCriteria: () => Promise<void>
+  readonly onConfirmCriterion: (criterionId: string) => Promise<void>
+  readonly onConfirmAllCriteria: (criterionIds: readonly string[]) => Promise<void>
 }) {
   const [isSubjectOpen, setIsSubjectOpen] = useState(false)
   const [isCriterionOpen, setIsCriterionOpen] = useState(false)
   const [isFileUploadOpen, setIsFileUploadOpen] = useState(false)
+  const [isGenerating, setIsGenerating] = useState(false)
+  const [isConfirmingAll, setIsConfirmingAll] = useState(false)
+  const hasProtocolFile = files.some((file) => file.file_scope === "project_protocol")
   const inclusionCount = criteria.filter((item) => item.criterion_type === "inclusion").length
   const exclusionCount = criteria.filter((item) => item.criterion_type === "exclusion").length
+  const draftCriterionIds = criteria.filter((item) => item.review_status === "draft").map((item) => item.id)
 
   return (
     <>
@@ -617,9 +757,46 @@ function ProjectWorkspace({
         <CardTitle
           title="入排标准"
           meta="AI 判断配置"
-          actions={<button className="btn btn-primary" type="button" onClick={() => setIsCriterionOpen(true)}>新增入排标准</button>}
+          actions={
+            <>
+              <button
+                className="btn btn-secondary"
+                type="button"
+                disabled={isGenerating || !hasProtocolFile}
+                title={hasProtocolFile ? "" : "请先上传研究方案文件"}
+                onClick={async () => {
+                  setIsGenerating(true)
+                  try {
+                    await onGenerateCriteria()
+                  } finally {
+                    setIsGenerating(false)
+                  }
+                }}
+              >
+                {isGenerating ? "AI 解析方案中…" : "AI 生成入排标准"}
+              </button>
+              {draftCriterionIds.length > 0 ? (
+                <button
+                  className="btn btn-primary"
+                  type="button"
+                  disabled={isConfirmingAll}
+                  onClick={async () => {
+                    setIsConfirmingAll(true)
+                    try {
+                      await onConfirmAllCriteria(draftCriterionIds)
+                    } finally {
+                      setIsConfirmingAll(false)
+                    }
+                  }}
+                >
+                  {isConfirmingAll ? "确认中…" : `全部采用（${draftCriterionIds.length}）`}
+                </button>
+              ) : null}
+              <button className="btn btn-primary" type="button" onClick={() => setIsCriterionOpen(true)}>新增入排标准</button>
+            </>
+          }
         />
-        {criteria.length === 0 ? <EmptyState>暂无入排标准。</EmptyState> : <CriteriaTable criteria={criteria} />}
+        {criteria.length === 0 ? <EmptyState>暂无入排标准。上传研究方案后可点击「AI 生成入排标准」自动解析。</EmptyState> : <CriteriaTable criteria={criteria} onConfirmCriterion={onConfirmCriterion} />}
       </DataCard>
       <DataCard>
         <CardTitle title="项目级 AI 提示词" meta="控制整体判断原则和证据引用要求" />
@@ -687,25 +864,34 @@ function ProjectPromptForm({
 }
 
 function SubjectForm({ onSubmit }: { readonly onSubmit: (form: { subject_no: string; site_name?: string; gender?: string; age?: number; diagnosis?: string }) => Promise<void> }) {
+  const [busy, setBusy] = useState(false)
+
   return (
     <form className="form-grid card-pad" onSubmit={(event) => {
       event.preventDefault()
-      const form = new FormData(event.currentTarget)
+      if (busy) {
+        return
+      }
+      const formElement = event.currentTarget
+      const form = new FormData(formElement)
       const ageValue = String(form.get("age") ?? "")
+      setBusy(true)
       void onSubmit({
         subject_no: String(form.get("subject_no") ?? ""),
         site_name: String(form.get("site_name") ?? ""),
         gender: String(form.get("gender") ?? ""),
         age: ageValue === "" ? undefined : Number(ageValue),
         diagnosis: String(form.get("diagnosis") ?? ""),
-      }).then(() => event.currentTarget.reset())
+      })
+        .then(() => formElement.reset())
+        .finally(() => setBusy(false))
     }}>
       <label className="field"><span>受试者编号</span><input className="input" name="subject_no" placeholder="S-001" required /></label>
       <label className="field"><span>中心</span><input className="input" name="site_name" placeholder="郑州中心" /></label>
       <label className="field"><span>性别</span><select className="select" name="gender" defaultValue=""><option value="">未填</option><option value="男">男</option><option value="女">女</option></select></label>
       <label className="field"><span>年龄</span><input className="input" name="age" type="number" min="0" /></label>
       <label className="field wide"><span>诊断</span><input className="input" name="diagnosis" placeholder="晚期非小细胞肺癌" /></label>
-      <div className="field form-actions"><span>&nbsp;</span><button className="btn btn-primary" type="submit">新增受试者</button></div>
+      <div className="field form-actions"><span>&nbsp;</span><button className="btn btn-primary" type="submit" disabled={busy}>{busy ? "创建中…" : "新增受试者"}</button></div>
     </form>
   )
 }
@@ -771,16 +957,52 @@ function SubjectsTable({ subjects }: { readonly subjects: Subject[] }) {
   )
 }
 
-function CriteriaTable({ criteria }: { readonly criteria: Criterion[] }) {
+function CriteriaTable({
+  criteria,
+  onConfirmCriterion,
+}: {
+  readonly criteria: Criterion[]
+  readonly onConfirmCriterion?: (criterionId: string) => Promise<void>
+}) {
+  const [confirmingIds, setConfirmingIds] = useState<readonly string[]>([])
+
+  const handleConfirm = async (criterionId: string) => {
+    if (onConfirmCriterion === undefined) {
+      return
+    }
+    setConfirmingIds((current) => [...current, criterionId])
+    try {
+      await onConfirmCriterion(criterionId)
+    } catch {
+      setConfirmingIds((current) => current.filter((id) => id !== criterionId))
+    }
+  }
+
   return (
     <div className="criteria-list card-pad">
-      {criteria.map((item) => (
-        <article className="criteria-item" key={item.id}>
-          <span className={item.criterion_type === "inclusion" ? "tag tag-success" : "tag tag-danger"}>{item.criterion_code} · {item.criterion_type === "inclusion" ? "入选" : "排除"}</span>
-          <p>{item.criterion_text}</p>
-          <small className="muted">{item.ai_instruction ?? "未配置标准级 AI 提示"}</small>
-        </article>
-      ))}
+      {criteria.map((item) => {
+        const isDraft = item.review_status === "draft"
+        const isConfirming = confirmingIds.includes(item.id)
+        return (
+          <article className="criteria-item" key={item.id}>
+            <div className="toolbar">
+              <span className={item.criterion_type === "inclusion" ? "tag tag-success" : "tag tag-danger"}>{item.criterion_code} · {item.criterion_type === "inclusion" ? "入选" : "排除"}</span>
+              {isDraft ? <span className="tag tag-warning">AI 草稿</span> : null}
+            </div>
+            <p>{item.criterion_text}</p>
+            <small className="muted">{item.ai_instruction ?? "未配置标准级 AI 提示"}</small>
+            {isDraft && onConfirmCriterion !== undefined ? (
+              <div className="toolbar">
+                {isConfirming ? (
+                  <span className="tag tag-info">确认中…</span>
+                ) : (
+                  <button className="btn btn-primary" type="button" onClick={() => void handleConfirm(item.id)}>确认采用</button>
+                )}
+              </div>
+            ) : null}
+          </article>
+        )
+      })}
     </div>
   )
 }

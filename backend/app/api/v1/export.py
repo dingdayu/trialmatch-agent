@@ -11,6 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import get_current_user, require_role
 from app.services.export_service import ExportService
+from app.services.audit_service import record_audit
+from app.schemas.enums import ActionType, TargetType
 from app.utils.response import APIResponse
 from app.models.user import User
 from app.config import get_settings
@@ -33,6 +35,15 @@ async def create_export(
         file_path = await service.generate_report(subject_id, task["export_task_id"])
         task["status"] = "completed"
         task["download_url"] = f"/api/v1/export-tasks/{task['export_task_id']}/download"
+        await record_audit(
+            db,
+            user_id=current_user.id,
+            action_type=ActionType.EXPORT,
+            target_type=TargetType.SUBJECT,
+            target_id=subject_id,
+            subject_id=subject_id,
+            after_value={"export_task_id": task["export_task_id"], "format": "json"},
+        )
         return APIResponse.success(data=task, message="报告已生成")
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
