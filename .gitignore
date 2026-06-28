@@ -3,3 +3,5 @@ dist/
 .vite/
 *.log
 **/__pycache__/
+backend/resource/
+.env
