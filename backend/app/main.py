@@ -7,6 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+from sqlalchemy import text
 
 from app.config import get_settings
 from app.database import init_db, async_session
@@ -164,11 +165,10 @@ async def health_check_detailed():
     try:
         from app.database import engine
         async with engine.begin() as conn:
-            await conn.run_sync(lambda c: c.execute("SELECT 1"))
+            _ = await conn.execute(text("SELECT 1"))
         health["database"] = "connected"
     except Exception as e:
         health["database"] = f"error: {str(e)}"
         health["status"] = "degraded"
 
     return health
-

@@ -17,7 +17,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.main import app
 from app.database import get_db, async_session, engine, Base
+from app.models.user import User
 from app.utils.security import create_access_token
+from app.utils.security import hash_password
 
 
 @pytest.fixture(scope="session")
@@ -33,7 +35,18 @@ async def test_db():
     """每个测试函数使用独立的内存数据库"""
     # 创建表
     async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
+
+    async with async_session() as session:
+        session.add(User(
+            username="admin",
+            password_hash=hash_password("admin123"),
+            display_name="系统管理员",
+            role="admin",
+            email="admin@trialmatch.com",
+        ))
+        await session.commit()
 
     yield
 
